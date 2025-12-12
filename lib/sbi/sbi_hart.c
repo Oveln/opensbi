@@ -11,6 +11,7 @@
 #include <sbi/riscv_barrier.h>
 #include <sbi/riscv_encoding.h>
 #include <sbi/riscv_fp.h>
+#include <sbi/riscv_locks.h>
 #include <sbi/sbi_bitops.h>
 #include <sbi/sbi_console.h>
 #include <sbi/sbi_domain.h>
@@ -28,6 +29,9 @@ extern void __sbi_expected_trap(void);
 extern void __sbi_expected_trap_hext(void);
 
 void (*sbi_hart_expected_trap)(void) = &__sbi_expected_trap;
+
+/* Spinlock to protect hart jump information output */
+static DEFINE_SPIN_LOCK(hart_jump_print_lock);
 
 static unsigned long hart_features_offset;
 static DECLARE_BITMAP(fw_smepmp_ids, PMP_COUNT);
@@ -1118,6 +1122,35 @@ sbi_hart_switch_mode(unsigned long arg0, unsigned long arg1,
 			csr_write(CSR_UIE, 0);
 		}
 	}
+
+	/* Print debug information before jumping to next stage */
+	spin_lock(&hart_jump_print_lock);
+	sbi_printf("[OpenSBI] Hart %u jumping to next stage:\n", current_hartid());
+	sbi_printf("[OpenSBI]   Next Address: 0x%lx\n", next_addr);
+	sbi_printf("[OpenSBI]   Next Mode: %lu (", next_mode);
+	switch (next_mode) {
+	case PRV_M:
+		sbi_printf("Machine");
+		break;
+	case PRV_S:
+		sbi_printf("Supervisor");
+		break;
+	case PRV_U:
+		sbi_printf("User");
+		break;
+	default:
+		sbi_printf("Unknown");
+		break;
+	}
+	sbi_printf(")\n");
+	sbi_printf("[OpenSBI]   Next Arg0: 0x%lx\n", arg0);
+	sbi_printf("[OpenSBI]   Next Arg1: 0x%lx\n", arg1);
+	if (next_virt)
+		sbi_printf("[OpenSBI]   Virtualization: Enabled\n");
+	else
+		sbi_printf("[OpenSBI]   Virtualization: Disabled\n");
+	sbi_printf("[OpenSBI]   Performing mret...\n");
+	spin_unlock(&hart_jump_print_lock);
 
 	register unsigned long a0 asm("a0") = arg0;
 	register unsigned long a1 asm("a1") = arg1;
