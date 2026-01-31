@@ -512,6 +512,30 @@ static void __noreturn init_warmboot(struct sbi_scratch *scratch, u32 hartid)
 	}
 }
 
+/**
+ * Jump to payload with parameters (similar to Rust's jump_to_payload)
+ *
+ * This function implements the same behavior as the Rust version:
+ * - entry (a0): the entry point address
+ * - hart_id (a1): will become a0 (argc/hart_id for payload)
+ * - opaque (a2): will become a1 (argv/opaque for payload)
+ *
+ * The payload's _start expects:
+ * - a0 = hart_id
+ * - a1 = opaque
+ */
+static void __attribute__((naked)) jump_to_payload(unsigned long entry,
+						    unsigned long hart_id,
+						    unsigned long opaque)
+{
+	__asm__ __volatile__(
+		"csrw	mepc, a0\n"	/* Save entry address to mepc */
+		"mv	a0, a1\n"	/* a0 = hart_id (first arg for payload) */
+		"mv	a1, a2\n"	/* a1 = opaque (second arg for payload) */
+		"mret"		/* Jump to payload */
+	);
+}
+
 static atomic_t coldboot_lottery = ATOMIC_INITIALIZER(0);
 
 /**
@@ -575,8 +599,28 @@ void __noreturn sbi_init(struct sbi_scratch *scratch)
 
 	if (coldboot)
 		init_coldboot(scratch, hartid);
-	else
-		init_warmboot(scratch, hartid);
+	else {
+		sbi_printf("Hart %u skipping coldboot\n", hartid);
+		if (current_hartid() == 0) {
+			/* Flush instruction cache before jumping */
+			RISCV_FENCE_I;
+
+			/* Set MPP to Machine mode for next mret */
+			csr_write(CSR_MSTATUS,
+				 (csr_read(CSR_MSTATUS) & ~MSTATUS_MPP) |
+				 (PRV_M << MSTATUS_MPP_SHIFT));
+
+			sbi_printf("Hart 0: Jumping to payload at 0x80400000\n");
+
+			/* Jump to payload with hart_id=0, opaque=0 */
+			jump_to_payload(0x80400000, 0, 0);
+
+			/* Should never reach here */
+			sbi_hart_hang();
+		} else {
+			init_warmboot(scratch, hartid);
+		}
+	}
 }
 
 void sbi_revert_entry_count(struct sbi_scratch *scratch)
