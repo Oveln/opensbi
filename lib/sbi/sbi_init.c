@@ -610,10 +610,10 @@ void __noreturn sbi_init(struct sbi_scratch *scratch)
 				 (csr_read(CSR_MSTATUS) & ~MSTATUS_MPP) |
 				 (PRV_M << MSTATUS_MPP_SHIFT));
 
-			sbi_printf("Hart 0: Jumping to payload at 0x41000000\n");
+			sbi_printf("Hart 0: Jumping to payload at 0x80000000\n");
 
 			/* Jump to payload with hart_id=0, opaque=0 */
-			jump_to_payload(0x41000000, 0, 0);
+			jump_to_payload(0xc0000000, 0, 0);
 
 			/* Should never reach here */
 			sbi_hart_hang();
