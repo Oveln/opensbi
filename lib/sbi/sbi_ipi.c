@@ -11,6 +11,7 @@
 #include <sbi/riscv_asm.h>
 #include <sbi/riscv_atomic.h>
 #include <sbi/riscv_barrier.h>
+#include <sbi/riscv_io.h>
 #include <sbi/sbi_bitops.h>
 #include <sbi/sbi_domain.h>
 #include <sbi/sbi_error.h>
@@ -24,6 +25,29 @@
 #include <sbi/sbi_pmu.h>
 #include <sbi/sbi_string.h>
 #include <sbi/sbi_tlb.h>
+
+/*
+ * Shared memory structure for hart synchronization.
+ * Placed at fixed address 0xc8000000 (defined in linker script).
+ * Matches Rust struct:
+ *   struct HartSyncFlags {
+ *       magic_number: u16,            // 0x0721
+ *       hart0_os_ready: AtomicBool,   // u8
+ *       hart1_os_ready: AtomicBool,   // u8
+ *       hart0_ipi_sent: AtomicBool,   // u8
+ *   }
+ */
+struct hart_sync {
+	volatile u16 magic_number;    /* offset 0x00: must be 0x0721 */
+	volatile u8 hart0_os_ready;   /* offset 0x02: AtomicBool */
+	volatile u8 hart1_os_ready;   /* offset 0x03: AtomicBool */
+	volatile u8 hart0_ipi_sent;   /* offset 0x04: AtomicBool */
+};
+
+#define HART_SYNC_MAGIC	0x0721
+#define HART_SYNC_ADDR	0xc8000000UL
+
+#define hart_sync_get()		((struct hart_sync *)HART_SYNC_ADDR)
 
 struct sbi_ipi_data {
 	unsigned long ipi_type;
@@ -268,6 +292,15 @@ void sbi_ipi_process(void)
 		}
 		ipi_type = ipi_type >> 1;
 		ipi_event++;
+	}
+
+	/*
+	 * Check if hart0 sent an external IPI (hart0 doesn't run OpenSBI).
+	 * If hart0_ipi_sent flag is set, forward to S-mode as SSIP.
+	 */
+	if (hart_sync_get()->hart0_ipi_sent) {
+		hart_sync_get()->hart0_ipi_sent = 0;
+		csr_set(CSR_MIP, MIP_SSIP);
 	}
 }
 
