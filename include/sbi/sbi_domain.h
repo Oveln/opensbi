@@ -164,6 +164,27 @@ struct sbi_domain_memregion {
 	unsigned long flags;
 };
 
+/** Check if regionA is sub-region of regionB */
+static inline bool sbi_domain_memregion_is_subset(
+				const struct sbi_domain_memregion *regA,
+				const struct sbi_domain_memregion *regB)
+{
+	ulong regA_start = regA->base;
+	ulong regA_mask = (regA->order >= __riscv_xlen) ? ~0UL : (BIT(regA->order) - 1);
+	ulong regA_end = regA_start + regA_mask;
+	ulong regB_start = regB->base;
+	ulong regB_mask = (regB->order >= __riscv_xlen) ? ~0UL : (BIT(regB->order) - 1);
+	ulong regB_end = regB_start + regB_mask;
+
+	if ((regB_start <= regA_start) &&
+	    (regA_start < regB_end) &&
+	    (regB_start < regA_end) &&
+	    (regA_end <= regB_end))
+		return true;
+
+	return false;
+}
+
 /** Representation of OpenSBI domain */
 struct sbi_domain {
 	/** Node in linked list of domains */
@@ -222,6 +243,9 @@ extern struct sbi_dlist domain_list;
 #define sbi_domain_for_each_memregion(__d, __r) \
 	for ((__r) = (__d)->regions; (__r)->order; (__r)++)
 
+#define sbi_domain_for_each_memregion_idx(__d, __r, __i) \
+	for ((__r) = (__d)->regions, (__i) = 0; (__r)->order; (__r)++, (__i)++)
+
 /**
  * Check whether given HART is assigned to specified domain
  * @param dom pointer to domain
@@ -252,6 +276,13 @@ void sbi_domain_memregion_init(unsigned long addr,
 				unsigned long size,
 				unsigned long flags,
 				struct sbi_domain_memregion *reg);
+
+/**
+ * Return the oldpmp pmpcfg LRWX encoding for the flags in @reg.
+ *
+ * @param reg pointer to memory region; its flags field encodes permissions.
+ */
+unsigned int sbi_domain_get_oldpmp_flags(struct sbi_domain_memregion *reg);
 
 /**
  * Return the Smepmp pmpcfg LRWX encoding for the flags in @reg.

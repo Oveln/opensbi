@@ -18,6 +18,8 @@
 #include <sbi/sbi_fwft.h>
 #include <sbi/sbi_hart.h>
 #include <sbi/sbi_hartmask.h>
+#include <sbi/sbi_hart_pmp.h>
+#include <sbi/sbi_hart_protection.h>
 #include <sbi/sbi_heap.h>
 #include <sbi/sbi_hsm.h>
 #include <sbi/sbi_ipi.h>
@@ -74,6 +76,7 @@ static void sbi_boot_print_general(struct sbi_scratch *scratch)
 	const struct sbi_hsm_device *hdev;
 	const struct sbi_ipi_device *idev;
 	const struct sbi_timer_device *tdev;
+	const struct sbi_hart_protection *hprot;
 	const struct sbi_console_device *cdev;
 	const struct sbi_system_reset_device *srdev;
 	const struct sbi_system_suspend_device *susp_dev;
@@ -90,6 +93,9 @@ static void sbi_boot_print_general(struct sbi_scratch *scratch)
 	sbi_printf("Platform Features           : %s\n", str);
 	sbi_printf("Platform HART Count         : %u\n",
 		   sbi_platform_hart_count(plat));
+	hprot = sbi_hart_protection_best();
+	sbi_printf("Platform HART Protection    : %s\n",
+		   (hprot) ? hprot->name : "---");
 	idev = sbi_ipi_get_device();
 	sbi_printf("Platform IPI Device         : %s\n",
 		   (idev) ? idev->name : "---");
@@ -259,11 +265,15 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 	 */
 	wake_coldboot_harts(scratch);
 
-	rc = sbi_platform_early_init(plat, true);
+	rc = sbi_hart_init(scratch, true);
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_hart_init(scratch, true);
+	rc = sbi_timer_init(scratch, true);
+	if (rc)
+		sbi_hart_hang();
+
+	rc = sbi_platform_early_init(plat, true);
 	if (rc)
 		sbi_hart_hang();
 
@@ -298,12 +308,6 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 	rc = sbi_tlb_init(scratch, true);
 	if (rc) {
 		sbi_printf("%s: tlb init failed (error %d)\n", __func__, rc);
-		sbi_hart_hang();
-	}
-
-	rc = sbi_timer_init(scratch, true);
-	if (rc) {
-		sbi_printf("%s: timer init failed (error %d)\n", __func__, rc);
 		sbi_hart_hang();
 	}
 
@@ -384,12 +388,12 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 	}
 
 	/*
-	 * Configure PMP at last because if SMEPMP is detected,
-	 * M-mode access to the S/U space will be rescinded.
+	 * Configure hart isolation at last because if SMEPMP is,
+	 * detected, M-mode access to the S/U space will be rescinded.
 	 */
-	rc = sbi_hart_pmp_configure(scratch);
+	rc = sbi_hart_protection_configure(scratch);
 	if (rc) {
-		sbi_printf("%s: PMP configure failed (error %d)\n",
+		sbi_printf("%s: hart isolation configure failed (error %d)\n",
 			   __func__, rc);
 		sbi_hart_hang();
 	}
@@ -418,11 +422,15 @@ static void __noreturn init_warm_startup(struct sbi_scratch *scratch,
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_platform_early_init(plat, false);
+	rc = sbi_hart_init(scratch, false);
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_hart_init(scratch, false);
+	rc = sbi_timer_init(scratch, false);
+	if (rc)
+		sbi_hart_hang();
+
+	rc = sbi_platform_early_init(plat, false);
 	if (rc)
 		sbi_hart_hang();
 
@@ -446,10 +454,6 @@ static void __noreturn init_warm_startup(struct sbi_scratch *scratch,
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_timer_init(scratch, false);
-	if (rc)
-		sbi_hart_hang();
-
 	rc = sbi_fwft_init(scratch, false);
 	if (rc)
 		sbi_hart_hang();
@@ -463,10 +467,10 @@ static void __noreturn init_warm_startup(struct sbi_scratch *scratch,
 		sbi_hart_hang();
 
 	/*
-	 * Configure PMP at last because if SMEPMP is detected,
-	 * M-mode access to the S/U space will be rescinded.
+	 * Configure hart isolation at last because if SMEPMP is,
+	 * detected, M-mode access to the S/U space will be rescinded.
 	 */
-	rc = sbi_hart_pmp_configure(scratch);
+	rc = sbi_hart_protection_configure(scratch);
 	if (rc)
 		sbi_hart_hang();
 
@@ -487,7 +491,7 @@ static void __noreturn init_warm_resume(struct sbi_scratch *scratch,
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_hart_pmp_configure(scratch);
+	rc = sbi_hart_protection_configure(scratch);
 	if (rc)
 		sbi_hart_hang();
 

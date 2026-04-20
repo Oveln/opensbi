@@ -13,6 +13,7 @@
 #include <sbi/sbi_domain.h>
 #include <sbi/sbi_ecall_interface.h>
 #include <sbi/sbi_hart.h>
+#include <sbi/sbi_hart_protection.h>
 #include <sbi/sbi_heap.h>
 #include <sbi/sbi_platform.h>
 #include <sbi/sbi_pmu.h>
@@ -226,7 +227,7 @@ static bool pmu_ctr_idx_validate(unsigned long cbase, unsigned long cmask)
 	return cmask && cbase + sbi_fls(cmask) < total_ctrs;
 }
 
-int sbi_pmu_ctr_fw_read(uint32_t cidx, uint64_t *cval)
+int sbi_pmu_ctr_fw_read(unsigned long cidx, uint64_t *cval, bool high_bits)
 {
 	int event_idx_type;
 	uint32_t event_code;
@@ -234,6 +235,14 @@ int sbi_pmu_ctr_fw_read(uint32_t cidx, uint64_t *cval)
 
 	if (unlikely(!phs))
 		return SBI_EINVAL;
+
+	if (cidx < num_hw_ctrs || cidx >= total_ctrs)
+		return SBI_EINVAL;
+
+#if __riscv_xlen > 32
+	if (high_bits)
+		return 0;
+#endif
 
 	event_idx_type = pmu_ctr_validate(phs, cidx, &event_code);
 	if (event_idx_type != SBI_PMU_EVENT_TYPE_FW)
@@ -447,10 +456,15 @@ static int pmu_ctr_start_fw(struct sbi_pmu_hart_state *phs,
 			    uint64_t event_data, uint64_t ival,
 			    bool ival_update)
 {
+	int ret;
+
 	if ((event_code >= SBI_PMU_FW_MAX &&
 	    event_code <= SBI_PMU_FW_RESERVED_MAX) ||
 	    event_code > SBI_PMU_FW_PLATFORM)
 		return SBI_EINVAL;
+
+	if (phs->fw_counters_started & BIT(cidx - num_hw_ctrs))
+		return SBI_EALREADY_STARTED;
 
 	if (SBI_PMU_FW_PLATFORM == event_code) {
 		if (!pmu_dev ||
@@ -464,9 +478,11 @@ static int pmu_ctr_start_fw(struct sbi_pmu_hart_state *phs,
 							cidx - num_hw_ctrs,
 							ival);
 
-		return pmu_dev->fw_counter_start(phs->hartid,
+		ret = pmu_dev->fw_counter_start(phs->hartid,
 						 cidx - num_hw_ctrs,
 						 event_data);
+		if (ret)
+			return ret;
 	} else {
 		if (ival_update)
 			phs->fw_counters_data[cidx - num_hw_ctrs] = ival;
@@ -621,6 +637,9 @@ static int pmu_ctr_stop_fw(struct sbi_pmu_hart_state *phs,
 	    event_code <= SBI_PMU_FW_RESERVED_MAX) ||
 	    event_code > SBI_PMU_FW_PLATFORM)
 		return SBI_EINVAL;
+
+	if (!(phs->fw_counters_started & BIT(cidx - num_hw_ctrs)))
+		return SBI_EALREADY_STOPPED;
 
 	if (SBI_PMU_FW_PLATFORM == event_code &&
 	    pmu_dev && pmu_dev->fw_counter_stop) {
@@ -1053,7 +1072,7 @@ int sbi_pmu_event_get_info(unsigned long shmem_phys_lo, unsigned long shmem_phys
 					 SBI_DOMAIN_READ | SBI_DOMAIN_WRITE))
 		return SBI_ERR_INVALID_ADDRESS;
 
-	sbi_hart_map_saddr(shmem_phys_lo, shmem_size);
+	sbi_hart_protection_map_range(shmem_phys_lo, shmem_size);
 
 	einfo = (struct sbi_pmu_event_info *)(shmem_phys_lo);
 	for (i = 0; i < num_events; i++) {
@@ -1087,7 +1106,7 @@ int sbi_pmu_event_get_info(unsigned long shmem_phys_lo, unsigned long shmem_phys
 		}
 	}
 
-	sbi_hart_unmap_saddr();
+	sbi_hart_protection_unmap_range(shmem_phys_lo, shmem_size);
 
 	return 0;
 }

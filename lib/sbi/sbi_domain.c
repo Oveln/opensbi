@@ -121,6 +121,28 @@ void sbi_domain_memregion_init(unsigned long addr,
 	}
 }
 
+unsigned int sbi_domain_get_oldpmp_flags(struct sbi_domain_memregion *reg)
+{
+
+	unsigned int pmp_flags = 0;
+
+	/*
+	 * If permissions are to be enforced for all modes on
+	 * this region, the lock bit should be set.
+	 */
+	if (reg->flags & SBI_DOMAIN_MEMREGION_ENF_PERMISSIONS)
+		pmp_flags |= PMP_L;
+
+	if (reg->flags & SBI_DOMAIN_MEMREGION_SU_READABLE)
+		pmp_flags |= PMP_R;
+	if (reg->flags & SBI_DOMAIN_MEMREGION_SU_WRITABLE)
+		pmp_flags |= PMP_W;
+	if (reg->flags & SBI_DOMAIN_MEMREGION_SU_EXECUTABLE)
+		pmp_flags |= PMP_X;
+
+	return pmp_flags;
+}
+
 unsigned int sbi_domain_get_smepmp_flags(struct sbi_domain_memregion *reg)
 {
 	unsigned int pmp_flags = 0;
@@ -263,29 +285,12 @@ static bool is_region_valid(const struct sbi_domain_memregion *reg)
 	return true;
 }
 
-/** Check if regionA is sub-region of regionB */
-static bool is_region_subset(const struct sbi_domain_memregion *regA,
-			     const struct sbi_domain_memregion *regB)
-{
-	ulong regA_start = regA->base;
-	ulong regA_end = regA->base + (BIT(regA->order) - 1);
-	ulong regB_start = regB->base;
-	ulong regB_end = regB->base + (BIT(regB->order) - 1);
-
-	if ((regB_start <= regA_start) &&
-	    (regA_start < regB_end) &&
-	    (regB_start < regA_end) &&
-	    (regA_end <= regB_end))
-		return true;
-
-	return false;
-}
-
 /** Check if regionA can be replaced by regionB */
 static bool is_region_compatible(const struct sbi_domain_memregion *regA,
 				 const struct sbi_domain_memregion *regB)
 {
-	if (is_region_subset(regA, regB) && regA->flags == regB->flags)
+	if (sbi_domain_memregion_is_subset(regA, regB) &&
+	    regA->flags == regB->flags)
 		return true;
 
 	return false;
@@ -345,7 +350,7 @@ static const struct sbi_domain_memregion *find_next_subset_region(
 
 	sbi_domain_for_each_memregion(dom, sreg) {
 		if (sreg == reg || (sreg->base <= addr) ||
-		    !is_region_subset(sreg, reg))
+		    !sbi_domain_memregion_is_subset(sreg, reg))
 			continue;
 
 		if (!ret || (sreg->base < ret->base) ||
@@ -364,11 +369,6 @@ static void swap_region(struct sbi_domain_memregion* reg1,
 	sbi_memcpy(&treg, reg1, sizeof(treg));
 	sbi_memcpy(reg1, reg2, sizeof(treg));
 	sbi_memcpy(reg2, &treg, sizeof(treg));
-}
-
-static void clear_region(struct sbi_domain_memregion* reg)
-{
-	sbi_memset(reg, 0x0, sizeof(*reg));
 }
 
 static int sbi_domain_used_memregions(const struct sbi_domain *dom)
@@ -458,10 +458,7 @@ static int sanitize_domain(struct sbi_domain *dom)
 
 		/* find a region is superset of reg, remove reg */
 		if (is_covered) {
-			for (j = i; j < (count - 1); j++)
-				swap_region(&dom->regions[j],
-					    &dom->regions[j + 1]);
-			clear_region(&dom->regions[count - 1]);
+			sbi_memmove(reg, reg + 1, sizeof(*reg) * (count - i));
 			count--;
 		} else
 			i++;
@@ -544,7 +541,7 @@ void sbi_domain_dump(const struct sbi_domain *dom, const char *suffix)
 	sbi_printf("Domain%d HARTs       %s: ", dom->index, suffix);
 	sbi_hartmask_for_each_hartindex(i, dom->possible_harts) {
 		j = sbi_hartindex_to_hartid(i);
-		sbi_printf("%s%d%s", (k++) ? "," : "",
+		sbi_printf("%s0x%x%s", (k++) ? "," : "",
 			   j, sbi_domain_is_assigned_hart(dom, i) ? "*" : "");
 	}
 	sbi_printf("\n");
@@ -703,7 +700,7 @@ static int root_add_memregion(const struct sbi_domain_memregion *reg)
 {
 	int rc;
 	bool reg_merged;
-	struct sbi_domain_memregion *nreg, *nreg1, *nreg2;
+	struct sbi_domain_memregion *nreg, *nreg1;
 	int root_memregs_count = sbi_domain_used_memregions(&root);
 
 	/* Sanity checks */
@@ -745,12 +742,10 @@ static int root_add_memregion(const struct sbi_domain_memregion *reg)
 			    (nreg->base + BIT(nreg->order)) == nreg1->base &&
 			    nreg->order == nreg1->order &&
 			    nreg->flags == nreg1->flags) {
+				int i1 = nreg1 - root.regions;
 				nreg->order++;
-				while (nreg1->order) {
-					nreg2 = nreg1 + 1;
-					sbi_memcpy(nreg1, nreg2, sizeof(*nreg1));
-					nreg1++;
-				}
+				sbi_memmove(nreg1, nreg1 + 1,
+					    sizeof(*nreg1) * (root_memregs_count - i1));
 				reg_merged = true;
 				root_memregs_count--;
 			}
@@ -918,18 +913,30 @@ int sbi_domain_init(struct sbi_scratch *scratch, u32 cold_hartid)
 	root.possible_harts = root_hmask;
 
 	/* Root domain firmware memory region */
-	sbi_domain_memregion_init(scratch->fw_start, scratch->fw_rw_offset,
-				  (SBI_DOMAIN_MEMREGION_M_READABLE |
-				   SBI_DOMAIN_MEMREGION_M_EXECUTABLE |
-				   SBI_DOMAIN_MEMREGION_FW),
-				  &root_memregs[root_memregs_count++]);
+	if (sbi_platform_single_fw_region(sbi_platform_ptr(scratch))) {
+		sbi_domain_memregion_init(scratch->fw_start, scratch->fw_size,
+					  (SBI_DOMAIN_MEMREGION_M_READABLE |
+					   SBI_DOMAIN_MEMREGION_M_WRITABLE |
+					   SBI_DOMAIN_MEMREGION_M_EXECUTABLE |
+					   SBI_DOMAIN_MEMREGION_FW),
+					  &root_memregs[root_memregs_count++]);
+	} else {
+		sbi_domain_memregion_init(scratch->fw_start,
+					  scratch->fw_rw_offset,
+					  (SBI_DOMAIN_MEMREGION_M_READABLE |
+					   SBI_DOMAIN_MEMREGION_M_EXECUTABLE |
+					   SBI_DOMAIN_MEMREGION_FW),
+					  &root_memregs[root_memregs_count++]);
 
-	sbi_domain_memregion_init((scratch->fw_start + scratch->fw_rw_offset),
-				  (scratch->fw_size - scratch->fw_rw_offset),
-				  (SBI_DOMAIN_MEMREGION_M_READABLE |
-				   SBI_DOMAIN_MEMREGION_M_WRITABLE |
-				   SBI_DOMAIN_MEMREGION_FW),
-				  &root_memregs[root_memregs_count++]);
+		sbi_domain_memregion_init((scratch->fw_start +
+					   scratch->fw_rw_offset),
+					  (scratch->fw_size -
+					   scratch->fw_rw_offset),
+					  (SBI_DOMAIN_MEMREGION_M_READABLE |
+					   SBI_DOMAIN_MEMREGION_M_WRITABLE |
+					   SBI_DOMAIN_MEMREGION_FW),
+					  &root_memregs[root_memregs_count++]);
+	}
 
 	root.fw_region_inited = true;
 
